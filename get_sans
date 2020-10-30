@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+
+from cryptography.x509 import load_der_x509_certificate, NameOID, ExtensionOID, DNSName
+import argparse
+import pathlib
+import socket
+import urllib
+import sys
+import ssl
+
+
+def main(domain, port, trim_wildcards):
+    # https://chaobin.github.io/2015/07/22/a-working-understanding-on-SSL-and-HTTPS-using-python/
+    # https://stackoverflow.com/questions/49132025/ssl-get-server-certificate-for-sites-with-sni-server-name-indication
+    if not domain:
+        print('Must have a non-zero length domain', file=sys.stderr)
+        sys.exit(1)
+    split = urllib.parse.urlsplit(domain)
+    addr = split.hostname
+    if split.port:
+        port = split.port
+    if addr is None:
+        addr, _, tmp_port = split.path.partition(':')  # if https:// is missing, puts domain in path
+        if tmp_port:
+            port = tmp_port
+    if not port:
+        port = 443
+
+
+    context = ssl.create_default_context()
+    with socket.create_connection((addr, port)) as sock:
+        with context.wrap_socket(sock, server_hostname=addr) as sslsock:
+            der_cert = sslsock.getpeercert(True)
+
+    results = {}
+
+    cert = load_der_x509_certificate(der_cert)
+    sub = cert.subject
+    cn_obj = sub.get_attributes_for_oid(NameOID.COMMON_NAME)
+    cn = None
+    if cn_obj:
+        cn = cn_obj[0].value
+        if cn.startswith('*.') and trim_wildcards:
+            cn = cn.lstrip('*.')
+        results[cn] = None
+
+    san = cert.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
+    if(san):
+        for dns in san.value.get_values_for_type(DNSName):
+            if dns.startswith('*.') and trim_wildcards:
+                dns = dns.lstrip('*.')
+            results[dns] = None
+
+    if results:
+        # Preserves insert order on Python 3.6+, not that it matters that much
+        for result in results.keys():
+            print(result)
+    else:
+        print('No domains in certificate', file=sys.stderr)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-p', '--port',
+                        help="Optional port number. Defaults to 443.")
+    parser.add_argument('--trim-wildcards', action='store_true',
+                        help="Trim the *. from the front of any wildcard "
+                             "DNS names. Should result in only valid domains "
+                             "output from the tool (which can be piped to "
+                             "another tool)")
+    parser.add_argument('domain',
+                        help="Domain name to retrieve the certificate from. Can "
+                             "optionally attach a port number with a colon ("
+                             "google.com:443)")
+
+    args = parser.parse_args()
+
+    try:
+        main(args.domain, args.port, args.trim_wildcards)
+    except:
+        import traceback
+        traceback.print_exc()
